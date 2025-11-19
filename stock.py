@@ -11,83 +11,6 @@ from utils import *
 from sklearn.preprocessing import RobustScaler
 
 
-# 技术指标计算函数（增强版）
-def calculate_ma(series, window):
-    return series.rolling(window, min_periods=1).mean().ffill()
-
-def calculate_rsi(series, window=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    # 添加平滑处理
-    avg_gain = gain.rolling(window, min_periods=1).mean().ffill().clip(lower=1e-8)
-    avg_loss = loss.rolling(window, min_periods=1).mean().ffill().clip(lower=1e-8)
-    
-    rs = avg_gain / (avg_loss + 1e-8)  # 防止除以0
-    return (100 - (100 / (1 + rs))).fillna(50).clip(0, 100)
-
-def calculate_cci(high, low, close, window=20):
-    tp = (high + low + close) / 3
-    sma = tp.rolling(window, min_periods=1).mean().ffill()
-    
-    # 使用更稳健的MAD计算
-    def robust_mad(x):
-        med = np.median(x)
-        return np.median(np.abs(x - med))
-    
-    mad = tp.rolling(window).apply(robust_mad, raw=True).ffill().clip(lower=1e-8)
-    return ((tp - sma) / (0.015 * mad)).fillna(0).clip(-200, 200)
-
-def calculate_macd(series, fast=12, slow=26, signal=9):
-    ema_fast = series.ewm(span=fast, min_periods=1).mean().ffill()
-    ema_slow = series.ewm(span=slow, min_periods=1).mean().ffill()
-    macd = (ema_fast - ema_slow).ffill()
-    signal_line = macd.ewm(span=signal, min_periods=1).mean().ffill()
-    return macd, signal_line
-
-def calculate_bollinger(series, window=20, num_std=2):
-    rolling_mean = series.rolling(window, min_periods=1).mean().ffill()
-    rolling_std = series.rolling(window, min_periods=1).std().ffill()
-    upper = (rolling_mean + (rolling_std * num_std)).ffill()
-    lower = (rolling_mean - (rolling_std * num_std)).ffill()
-    return pd.DataFrame({
-        'BOLL_upper': upper,
-        'BOLL_mid': rolling_mean,
-        'BOLL_lower': lower
-    })
-
-def calculate_atr(high, low, close, window=14):
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs()
-    ], axis=1).max(axis=1)
-    return tr.rolling(window, min_periods=1).mean().ffill()
-
-def calculate_obv(close, volume):
-    return (np.sign(close.diff()) * volume).ffill().cumsum().fillna(0)
-
-# 新增特征计算函数
-def industry_relative_strength(close, index_close, window=10):
-    stock_ma = close.rolling(window).mean()
-    index_ma = index_close.rolling(window).mean()
-    return (stock_ma / index_ma).fillna(1)
-
-def price_volume_divergence(close, volume, window=5):
-    """确保输入为数值类型"""
-    close = pd.to_numeric(close, errors='coerce')
-    volume = pd.to_numeric(volume, errors='coerce')
-    
-    price_change = close.astype(float).pct_change(window)
-    volume_change = volume.astype(float).pct_change(window)
-    return (price_change - volume_change).fillna(0)
-
-def volatility_ratio(close, short_window=5, long_window=20):
-    short_vol = close.pct_change().rolling(short_window).std()
-    long_vol = close.pct_change().rolling(long_window).std()
-    return (short_vol / long_vol).fillna(1)
-
 # 动态标签生成函数
 def generate_dynamic_label(stock_return, index_return, lookback_window=20):
     """
@@ -112,10 +35,15 @@ def generate_dynamic_label(stock_return, index_return, lookback_window=20):
     cond_outperform = (excess_return >= 0.03)
     
     # 条件3：上涨10%（绝对收益）
-    cond_abs_gain = (stock_return >= 0.1)
+    cond_abs_gain = (stock_return >= 0.088)
     
     # 生成标签
-    labels = (cond_outperform & cond_abs_gain).astype(int)
+    # labels = (cond_abs_gain).astype(int)
+
+    labels = np.where(
+        stock_return > 0.1, 1,  # 正样本
+        np.where(stock_return <= 0.05, 0, np.nan)  # 负样本或排除
+    )
     
     # 打印各条件触发比例（调试用）
     if len(labels) > 0:
@@ -128,9 +56,9 @@ def generate_dynamic_label(stock_return, index_return, lookback_window=20):
     return labels
 
 # 回测评估函数
-def backtest_evaluation(results_df, pred_proba, true_return, index_return, top_pct=0.1):
+def backtest_evaluation(results_df, pred_proba, true_return, index_return, top_pct=0.1, holding_period=15):
     """
-    完整回测评估逻辑（考虑交易成本）
+    综合回测评估：包含夏普比率、特雷诺比率
     """
     results_df['pred_proba'] = pred_proba
     results_df = results_df.sort_values('pred_proba', ascending=False)
@@ -138,31 +66,60 @@ def backtest_evaluation(results_df, pred_proba, true_return, index_return, top_p
     # 选取前10%股票
     top_stocks = results_df.iloc[:int(len(results_df)*top_pct)]
     
-    # 计算实际收益（考虑0.01%交易成本）
+    if len(top_stocks) == 0:
+        return {
+            'excess_return': 0, 'win_rate': 0, 'sharpe_ratio': 0, 'treynor_ratio': 0,
+            'annualized_excess': 0, 'num_trades': 0, 'hit_rate': 0
+        }
+    
+    # 计算实际收益（考虑交易成本）
     net_return = top_stocks[true_return] - 0.0001
     benchmark_return = top_stocks[index_return]
     
-    # 计算关键指标
-    excess_return = (net_return - benchmark_return).mean()
+    # 计算超额收益
+    excess_returns = net_return - benchmark_return
+    
+    # 基础指标
+    avg_excess_return = excess_returns.mean()
     win_rate = (net_return > benchmark_return).mean()
-    sharpe_ratio = excess_return / (net_return.std() + 1e-8)
+    hit_rate = (excess_returns > 0).mean()
+    
+    # 年化计算（关键修正）
+    periods_per_year = 252 / holding_period  # 一年有多少个持有期
+    
+    # 年化超额收益 = 平均每期超额收益 × 每年期数
+    annualized_excess = avg_excess_return * periods_per_year
+    
+    # 年化波动率 = 每期超额收益标准差 × √每年期数
+    if len(excess_returns) > 1:
+        annual_volatility = excess_returns.std() * np.sqrt(periods_per_year)
+    else:
+        annual_volatility = 0
+    
+    # 1. 夏普比率（总风险调整）
+    sharpe_ratio = annualized_excess / annual_volatility if annual_volatility > 0 else 0
+    
+    # 2. 特雷诺比率（系统性风险调整）- 需要计算Beta
+    # 简化版：假设与市场高度相关，用市场波动率代替
+    market_volatility = benchmark_return.std() * np.sqrt(periods_per_year) if len(benchmark_return) > 1 else 0.15
+    treynor_ratio = annualized_excess / market_volatility if market_volatility > 0 else 0
     
     return {
-        'excess_return': excess_return,
-        'win_rate': win_rate,
-        'sharpe_ratio': sharpe_ratio,
-        'num_trades': len(top_stocks)
+        'excess_return': avg_excess_return,      # 平均每期超额收益
+        'annualized_excess': annualized_excess,   # 年化超额收益
+        'win_rate': win_rate,                     # 胜率（绝对收益胜率）
+        'hit_rate': hit_rate,                     # 超额收益胜率
+        'sharpe_ratio': sharpe_ratio,             # 夏普比率（总风险）
+        'treynor_ratio': treynor_ratio,           # 特雷诺比率（系统风险）
+        'annual_volatility': annual_volatility,   # 年化波动率
+        'num_trades': len(top_stocks),
+        'periods_per_year': periods_per_year      # 年化系数（用于验证）
     }
 
 def main():
-    # 获取最新有效日期
-    def get_valid_date():
-        hs300 = ak.stock_zh_index_daily(symbol="sh000300")
-        return pd.to_datetime(hs300['date'].iloc[-1])
-    
     # 设置时间窗口
     end_date = get_valid_date()
-    train_end_date = end_date - timedelta(days=60)
+    train_end_date = end_date - timedelta(days=20)
     train_start_date = end_date - timedelta(days=2000)
     predict_start_date = end_date - timedelta(days=60)
     predict_end_date = end_date
@@ -175,13 +132,35 @@ def main():
     symbols = hs300['成分券代码'].tolist()
     name_map = dict(zip(hs300['成分券代码'], hs300['成分券名称']))
 
-    # 数据处理函数（增强版）
+
     def process_data(df, index_data, is_training=True):
-        # 确保所有数值列都是float类型
+        # 确保列名是中文的（新浪财经可能返回英文列名）
+        if 'open' in df.columns:
+            # 英文列名转中文
+            df = df.rename(columns={
+                'open': '开盘', 'high': '最高', 'low': '最低', 
+                'close': '收盘', 'volume': '成交量', 'date': '日期'
+            })
+        
+        # 验证必要列是否存在
+        required_cols = ['开盘', '最高', '最低', '收盘', '成交量', '日期']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"缺失必要列: {missing_cols}")
+        
+        # 确保数据类型正确
         numeric_cols = ['开盘', '最高', '最低', '收盘', '成交量']
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # 确保日期列正确
+        df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
+        df = df.dropna(subset=['日期'])
+        
+        # 后续处理保持不变...
         df = df.copy()
-        df['日期'] = pd.to_datetime(df['日期'])
+        df = df.sort_values('日期')
         
         # 基础价格数据
         close = df['收盘'].ffill()
@@ -191,7 +170,9 @@ def main():
         
         # 计算技术指标（核心）
         df['MA5'] = calculate_ma(close, 5)
+        df['MA10'] = calculate_ma(close, 10)
         df['MA20'] = calculate_ma(close, 20)
+        df['MA30'] = calculate_ma(close, 30)
         df['RSI'] = calculate_rsi(close)
         df['MACD'], df['MACD_Signal'] = calculate_macd(close)
         
@@ -253,12 +234,25 @@ def main():
         # 添加九转组合特征
         df['NT_Strength'] = df['NT_NetSignal'] * df['NT_Threshold']
         df['NT_VolumeRatio'] = df['成交量'] / df['成交量'].rolling(20).mean().shift(1)
-        
+
+        df['SmartMoneyDiv'] = calculate_smart_money_divergence(close, volume)
+        df['VolCluster'] = calculate_volatility_clustering(close)
+        df['LiquidityShock'] = calculate_liquidity_shock(close, volume)
+        df['OrderFlow'] = calculate_order_flow(high, low, close, volume)
+        df['SentimentExtreme'] = calculate_sentiment_extremes(df['RSI'], df['CCI'])
+
+        df = add_return_features(df, window=30)  # 添加10天收益率序列
+        df = add_volume_features(df, window=30)  # 添加10天成交量变化率
+
         if is_training:
             lookahead_days = 15
-            df['未来收盘价'] = df['收盘'].shift(-lookahead_days)
+            # 计算未来15天内的最高收盘价（使用rolling+shift技巧）
+            df['未来15日收益'] = df['收盘'].rolling(window=lookahead_days, min_periods=1).max().shift(-lookahead_days)
+            # 保留原始数据长度
             df = df.iloc[:-lookahead_days]
-            df['未来15日收益'] = df['未来收盘价'] / df['收盘'] - 1
+            # 计算最大潜在收益率 = (未来15日最高价 - 当前价格)/当前价格
+            df['未来15日收益'] = df['未来15日收益'] / df['收盘'] - 1
+            # 删除包含NaN的行
             df = df.dropna(subset=['未来15日收益'])
         
         return df
@@ -267,7 +261,7 @@ def main():
     hs300_data = ak.stock_zh_index_daily(symbol="sh000300")
     hs300_data['date'] = pd.to_datetime(hs300_data['date'])
     hs300_data = hs300_data.set_index('date').sort_index()
-    hs300_data['未来收盘价'] = hs300_data['close'].shift(-15)
+    hs300_data['未来收盘价'] = hs300_data['close'].shift(-10)
     hs300_data = hs300_data.dropna(subset=['未来收盘价'])
     hs300_data['未来15日收益'] = hs300_data['未来收盘价'] / hs300_data['close'] - 1
 
@@ -276,11 +270,10 @@ def main():
     train_features = []
     for symbol in symbols[:300]: 
         try:
-            df = ak.stock_zh_a_hist(
+            df = safe_get_stock_data(
                 symbol=symbol,
                 start_date=train_start_date.strftime('%Y%m%d'),
-                end_date=train_end_date.strftime('%Y%m%d'),
-                adjust="qfq"
+                end_date=train_end_date.strftime('%Y%m%d')
             )
 
             processed = process_data(df, hs300_data, is_training=True)
@@ -318,8 +311,12 @@ def main():
         merged_train['未来15日收益_y']
     )
 
+    # 关键过滤步骤：删除中间地带的样本
+    merged_train = merged_train.dropna(subset=['label']).copy()
+    merged_train['label'] = merged_train['label'].astype(int)
+
     # 更新特征列定义
-    feature_cols = ['MA5', 'MA20', 'RSI', 'MACD', 'MACD_Signal', 
+    feature_cols = ['MA5', 'MA10', 'MA20', 'MA30', 'RSI', 'MACD', 'MACD_Signal', 
                 'BOLL_upper', 'BOLL_mid', 'BOLL_lower',
                 'ATR', 'OBV', 'CCI', 'VOLATILITY',
                 'INDUSTRY_RS', 'PV_DIVERGENCE', 'VOL_RATIO',
@@ -328,9 +325,13 @@ def main():
                 'NT_BuyCount', 'NT_SellCount', 'NT_NetSignal',
                 'NT_TopDiv', 'NT_BottomDiv', 'NT_Threshold',
                 'NT_Strength', 'NT_VolumeRatio']
+    feature_cols += ['SmartMoneyDiv', 'VolCluster', 'LiquidityShock', 
+                'OrderFlow', 'SentimentExtreme']
+    feature_cols += [f'Ret_{i}day' for i in range(1,31)] + \
+                    [f'VolChg_{i}day' for i in range(1,31)]
 
     # 时间序列交叉验证
-    tscv = TimeSeriesSplit(n_splits=5)
+    tscv = TimeSeriesSplit(n_splits=10)
     cv_results = []
     
     for fold, (train_idx, val_idx) in enumerate(tscv.split(merged_train)):
@@ -361,8 +362,8 @@ def main():
             total_na = df.isna().sum().sum()
             print(f"\n[{dataset_name}] 缺失值统计:")
             print(f"总缺失值数量: {total_na} ({total_na/df.size:.2%})")
-            print("各特征缺失比例：")
-            print(na_percent.sort_values(ascending=False).apply(lambda x: f"{x:.2f}%").to_string())
+            # print("各特征缺失比例：")
+            # print(na_percent.sort_values(ascending=False).apply(lambda x: f"{x:.2f}%").to_string())
         
         print_nan_stats(X_train, "训练集")
         print_nan_stats(X_val, "验证集")
@@ -387,15 +388,15 @@ def main():
         # 训练模型
         model = xgb.XGBClassifier(
             objective='binary:logistic',
-            n_estimators=5000,
-            max_depth=5,  # 减小深度防止过拟合
-            learning_rate=0.01,
+            n_estimators=8000,
+            max_depth=3,  # 减小深度防止过拟合
+            learning_rate=0.2,
             subsample=0.7,
-            colsample_bytree=0.6,
-            reg_alpha=0.1,  # 增强L1正则化
-            reg_lambda=0.1,  # 增强L2正则化
-            min_child_weight=2,  # 防止过小的叶节点
-            max_bin=64,  # 限制分箱数
+            colsample_bytree=0.5,
+            reg_alpha=10,  # 增强L1正则化
+            reg_lambda=10,  # 增强L2正则化
+            min_child_weight=10,  # 防止过小的叶节点
+            max_bin=16,  # 限制分箱数
             tree_method='hist',  # 使用直方图算法
             random_state=2025,
             early_stopping_rounds=500,
@@ -410,10 +411,26 @@ def main():
             sample_weight=weights,
             verbose=50
         )
+
+        # ✅ 修正：计算训练集和验证集得分
+        train_score = model.score(X_train_scaled, y_train)
+        val_score = model.score(X_val_scaled, y_val)
+        print(f"训练集得分: {train_score:.4f}, 验证集得分: {val_score:.4f}")
         
-        # 验证集预测
-        y_pred = model.predict(X_val)
-        y_proba = model.predict_proba(X_val)[:,1]
+        # ✅ 修正：使用缩放后的数据进行预测
+        y_pred = model.predict(X_val_scaled)
+        y_proba = model.predict_proba(X_val_scaled)[:,1]
+
+        from sklearn.metrics import roc_auc_score, classification_report
+
+        # 计算AUC和其他指标
+        train_proba = model.predict_proba(X_train_scaled)[:,1]
+        val_proba = model.predict_proba(X_val_scaled)[:,1]
+
+        train_auc = roc_auc_score(y_train, train_proba)
+        val_auc = roc_auc_score(y_val, val_proba)
+
+        print(f"训练集AUC: {train_auc:.4f}, 验证集AUC: {val_auc:.4f}")
         
         # 存储当前折的结果
         val_results = X_val.copy()
@@ -435,6 +452,12 @@ def main():
         print(f"超额收益: {bt_result['excess_return']:.2%}")
         print(f"胜率: {bt_result['win_rate']:.2%}")
         print(f"夏普比率: {bt_result['sharpe_ratio']:.2f}")
+
+        # 新增指标（如果存在）
+        if 'treynor_ratio' in bt_result:
+            print(f"特雷诺比率: {bt_result['treynor_ratio']:.2f}")
+        if 'annualized_excess' in bt_result:
+            print(f"年化超额收益: {bt_result['annualized_excess']:.2%}")
 
     # 计算交叉验证平均结果
     avg_excess_return = np.mean([r['excess_return'] for r in cv_results])
@@ -465,16 +488,20 @@ def main():
     # 训练最终模型
     print("\n训练最终模型...")
     final_model = xgb.XGBClassifier(
-        objective='binary:logistic',
-        n_estimators=int(2000 * 1.2),
-        max_depth=6,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.7,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
-        random_state=2025,
-        missing=np.nan
+            objective='binary:logistic',
+            n_estimators=8000,
+            max_depth=3,  # 减小深度防止过拟合
+            learning_rate=0.2,
+            subsample=0.7,
+            colsample_bytree=0.5,
+            reg_alpha=10,  # 增强L1正则化
+            reg_lambda=10,  # 增强L2正则化
+            min_child_weight=10,  # 防止过小的叶节点
+            max_bin=16,  # 限制分箱数
+            tree_method='hist',  # 使用直方图算法
+            random_state=2025,
+            enable_categorical=False,
+            missing=np.nan  # 显式处理缺失值
     )
 
     final_model.fit(
@@ -486,20 +513,24 @@ def main():
     # 获取最新数据用于推理
     print("\n获取最新数据用于推理...")
     predict_features = []
+    count = 0  # 添加计数器变量
     for symbol in symbols[:300]:
         try:
-            df = ak.stock_zh_a_hist(
+            count += 1
+            if count > 1 and count % 10 == 0:  # 修复这里：使用count代替i
+                time.sleep(2)
+            df = safe_get_stock_data(
                 symbol=symbol,
-                start_date=predict_start_date.strftime('%Y%m%d'),
-                end_date=predict_end_date.strftime('%Y%m%d'),
-                adjust="qfq"
+                start_date=train_start_date.strftime('%Y%m%d'),
+                end_date=train_end_date.strftime('%Y%m%d')
             )
             if len(df) < 30:
                 print(f"推理数据跳过 {symbol} ({name_map.get(symbol, '未知')}): 数据不足 ({len(df)}天)")
                 continue
                 
-            processed = process_data(df, hs300_data, is_training=False).tail(1)
+            processed = process_data(df, hs300_data, is_training=False)
             if not processed.empty:
+                processed = processed.tail(3)
                 processed['symbol'] = symbol
                 predict_features.append(processed)
                 print(f"\r已处理 {len(predict_features)}/{len(symbols)}", end="")
@@ -520,13 +551,71 @@ def main():
     X_predict = X_predict.fillna(medians)  # 使用训练集中位数填充
     X_predict = X_predict.clip(-1e10, 1e10)
 
-    # 预测
-    probas = final_model.predict_proba(X_predict)[:,1]
-    result_df = pd.DataFrame({
-        '股票代码': predict_df['symbol'],
-        '股票名称': predict_df['symbol'].map(name_map),
-        '跑赢概率': probas
-    }).sort_values('跑赢概率', ascending=False).head(20)
+    # 使用3天加权平均进行预测
+    print("\n使用3天加权平均进行预测...")
+    symbol_probas = {}
+    symbol_daily_scores = {}  # 新增：存储每天得分
+
+    # 按股票代码分组处理
+    for symbol, group in predict_df.groupby('symbol'):
+        # 取最后3天数据
+        recent_data = group.tail(3)
+        
+        if len(recent_data) == 0:
+            continue
+            
+        # 设置权重（最近的一天权重最高）
+        if len(recent_data) == 3:
+            weights = [0.2, 0.3, 0.5]  # 3天权重
+        elif len(recent_data) == 2:
+            weights = [0.3, 0.7]  # 2天权重
+        else:
+            weights = [1.0]  # 1天权重
+        
+        # 准备特征数据
+        X_recent = recent_data[feature_cols].copy()
+        X_recent = X_recent.replace([np.inf, -np.inf], np.nan)
+        X_recent = X_recent.fillna(medians)
+        X_recent = X_recent.clip(-1e10, 1e10)
+        
+        # 预测每条数据的概率
+        daily_probas = final_model.predict_proba(X_recent)[:, 1]
+        
+        # 计算加权平均
+        weighted_proba = np.average(daily_probas, weights=weights)
+        symbol_probas[symbol] = weighted_proba
+        
+        # 新增：存储每天得分和日期
+        dates = recent_data.index.strftime('%m-%d').tolist()  # 只显示月-日
+        symbol_daily_scores[symbol] = {
+            'weighted': weighted_proba,
+            'daily': list(zip(dates, daily_probas))[-3:]  # 只保留最后3天
+        }
+
+    # 创建结果DataFrame
+    result_data = []
+    for symbol, proba in symbol_probas.items():
+        # 获取该股票的每日得分
+        daily_info = symbol_daily_scores.get(symbol, {})
+        daily_scores = daily_info.get('daily', [])
+        
+        # 提取最近3天的得分
+        score_info = {}
+        for i, (date, score) in enumerate(daily_scores[-3:], 1):  # 只取最近3天
+            score_info[f'D{i}得分'] = score
+            score_info[f'D{i}日期'] = date
+        
+        result_data.append({
+            '股票代码': symbol,
+            '股票名称': name_map.get(symbol, '未知'),
+            '加权得分': proba,
+            **score_info  # 加入每日得分
+        })
+
+    result_df = pd.DataFrame(result_data).sort_values('加权得分', ascending=False).head(30)
+    result_df_lose = pd.DataFrame(result_data).sort_values('加权得分', ascending=True).head(10)
+
+    print(f"加权平均预测完成，共处理 {len(symbol_probas)} 只股票")
 
     # 输出结果
     print("\n特征重要性: ")
@@ -534,8 +623,115 @@ def main():
     for k, v in sorted(importance.items(), key=lambda x: x[1], reverse=True):
         print(f"{k}: {v}")
 
-    print("\nTop 20预测结果（基于最新数据）: ")
+    print("\nTop 30预测结果（基于最新数据）: ")
     print(result_df.to_string(index=False, float_format="%.4f"))
+
+    print("\n倒数Top 10预测结果（基于最新数据）: ")
+    print(result_df_lose.to_string(index=False, float_format="%.4f"))
+
+    # 最健壮的合并方案
+    detailed_df = predict_df.reset_index().merge(
+        result_df,
+        left_on='symbol',
+        right_on='股票代码',
+        how='right'
+    )
+
+    # 确保股票代码列存在
+    if '股票代码' not in detailed_df.columns:
+        detailed_df['股票代码'] = detailed_df['symbol'] if 'symbol' in detailed_df.columns else detailed_df.index
+
+    # 打印函数最终版
+    def print_stock_features(stock_code, features_df, feature_cols, proba, daily_scores):
+        try:
+            print("\n" + "="*80)
+            print(f"股票代码: {stock_code} | 股票名称: {name_map.get(stock_code, '未知')}")
+            print(f"加权得分: {proba:.4f}")
+            
+            # 打印每日得分
+            if daily_scores:
+                print("-"*40 + " 每日得分趋势 " + "-"*40)
+                sorted_dates = sorted(daily_scores.keys())
+                for date in sorted_dates[-3:]:  # 只显示最近3天
+                    print(f"{date}: {daily_scores[date]:.4f}")
+            
+            print("-"*40 + " 特征详情 " + "-"*40)
+            
+            importance = final_model.get_booster().get_score(importance_type='weight')
+            sorted_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)
+            
+            # 获取该股票数据
+            stock_data = features_df[features_df['股票代码'] == stock_code].iloc[0]
+            
+            for i in range(0, len(sorted_features), 5):
+                batch = sorted_features[i:i+5]
+                for feat, imp in batch:
+                    if feat in stock_data:
+                        print(f"{feat:>25}: {stock_data[feat]:>10.4f} (重要性: {imp:.0f})", end=" | ")
+                    else:
+                        print(f"{feat:>25}: {'N/A':>10} (重要性: {imp:.0f})", end=" | ")
+                print()
+        except Exception as e:
+            print(f"\n打印股票 {stock_code} 特征时出错: {str(e)}")
+        finally:
+            print("="*80)
+    
+    # # 对每只股票调用打印函数 
+    # for _, row in result_df.iterrows():
+    #     print_stock_features(
+    #         stock_code=row['股票代码'],
+    #         features_df=detailed_df,
+    #         feature_cols=feature_cols,
+    #         proba=row['跑赢概率']
+    #     )
+
+    # 添加历史时间点截面分析
+    historical_dates = ['20240624', '20241224', '20230624', '20231224', '20220624', '20221224']  # 示例日期
+
+    # 获取训练集中的所有日期
+    all_dates = merged_train['日期'].unique()
+    all_dates = sorted(all_dates)
+
+    # 每隔7天选取一个日期
+    selected_dates = []
+    for i in range(0, len(all_dates), 7):
+        if i < len(all_dates):
+            selected_dates.append(all_dates[i].strftime('%Y%m%d'))
+        if len(selected_dates) >= 300:  # 只取100个日期
+            break
+    
+    print("\n历史时间点截面分析:")
+    for date_str in selected_dates:
+        try:
+            # 转换为datetime对象
+            target_date = datetime.strptime(date_str, '%Y%m%d')
+            
+            # 从训练数据中提取该日期的截面数据
+            date_data = merged_train[merged_train['日期'] == target_date]
+            
+            if len(date_data) == 0:
+                print(f"未找到 {date_str} 的数据")
+                continue
+                
+            # 准备特征数据
+            X_date = date_data[feature_cols].copy()
+            X_date = X_date.replace([np.inf, -np.inf], np.nan)
+            X_date = X_date.fillna(medians)  # 使用训练集中位数填充
+            X_date = X_date.clip(-1e10, 1e10)
+            
+            # 预测
+            probas = final_model.predict_proba(X_date)[:,1]
+            
+            # 找到TOP1股票
+            top_idx = np.argmax(probas)
+            top_stock = date_data.iloc[top_idx]
+            
+            # 输出结果
+            print(f"{date_str}: {top_stock['symbol']} ({name_map.get(top_stock['symbol'], '未知')}), "
+                  f"预测概率: {probas[top_idx]:.4f}, "
+                  f"实际15日收益: {top_stock['未来15日收益_x']:.2%}")
+        except Exception as e:
+            print(f"处理 {date_str} 时出错: {str(e)}")
 
 if __name__ == "__main__":
     main()
