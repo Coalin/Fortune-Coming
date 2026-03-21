@@ -1,0 +1,23 @@
+# 敏感文件
+config.py
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+
+# 数据和缓存
+data/
+*.csv
+*.json
+downloads/
+extract/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
