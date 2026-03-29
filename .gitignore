@@ -11,6 +11,7 @@ data/
 *.json
 downloads/
 extract/
+stock_analysis_results/
 
 # IDE
 .vscode/

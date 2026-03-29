@@ -9,7 +9,10 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from utils import *
 from sklearn.preprocessing import RobustScaler
+from visualizer import StockVisualizer
 
+
+USE_INDEX = "zz500"  # 开关变量，可选值: "hs300" (沪深300) 或 "zz500" (中证500)
 
 # 动态标签生成函数
 def generate_dynamic_label(stock_return, index_return, potential_drawdown, lookback_window=20):
@@ -115,10 +118,17 @@ def main():
     print(f"训练数据时间窗口: {train_start_date.strftime('%Y%m%d')} - {train_end_date.strftime('%Y%m%d')}")
     print(f"推理数据时间窗口: {predict_start_date.strftime('%Y%m%d')} - {predict_end_date.strftime('%Y%m%d')}")
 
-    # 获取沪深300成分股
-    hs300 = ak.index_stock_cons_csindex(symbol="000300")
+    # 获取成分股
+    if USE_INDEX == "hs300":
+        hs300 = ak.index_stock_cons_csindex(symbol="000300")
+    elif USE_INDEX == "zz500":
+        hs300 = ak.index_stock_cons_csindex(symbol="000905")
+    else:
+        raise NotImplementedError()
+    # hs300 = ak.index_stock_cons_csindex(symbol="000300")
     symbols = hs300['成分券代码'].tolist()
     name_map = dict(zip(hs300['成分券代码'], hs300['成分券名称']))
+    print(f"当前使用成分股: {USE_INDEX.upper()}，共 {len(symbols)} 只股票")
 
 
     def process_data(df, index_data, is_training=True):
@@ -280,7 +290,7 @@ def main():
     print("\n获取训练数据...")
     train_features = []
     # 测试修改
-    for symbol in symbols[:300]: 
+    for symbol in symbols[:500]: 
         try:
             df = safe_get_stock_data(
                 symbol=symbol,
@@ -530,7 +540,7 @@ def main():
     predict_features = []
     count = 0  # 添加计数器变量
     # 测试修改
-    for symbol in symbols[:300]:
+    for symbol in symbols[:500]:
         try:
             count += 1
             if count > 1 and count % 10 == 0:  # 修复这里：使用count代替i
@@ -582,9 +592,9 @@ def main():
             
         # 设置权重（最近的一天权重最高）
         if len(recent_data) == 3:
-            weights = [0.2, 0.3, 0.5]  # 3天权重
+            weights = [0.1, 0.2, 0.7]  # 3天权重
         elif len(recent_data) == 2:
-            weights = [0.3, 0.7]  # 2天权重
+            weights = [0.2, 0.8]  # 2天权重
         else:
             weights = [1.0]  # 1天权重
         
@@ -650,7 +660,7 @@ def main():
     print("📈 大模型技术分析建议")
     print("="*80)
 
-    analysis_result = get_llm_analysis(result_df, n=3)
+    analysis_result = get_llm_analysis(result_df, n=5)
     print(analysis_result)
 
     # 最健壮的合并方案
@@ -747,6 +757,46 @@ def main():
                   f"实际7日收益: {top_stock['未来7日收益_x']:.2%}")
         except Exception as e:
             print(f"处理 {date_str} 时出错: {str(e)}")
+
+    # 获取特征重要性
+    importance = final_model.get_booster().get_score(importance_type='weight')
+    
+    # 初始化可视化工具
+    print("\n" + "="*80)
+    print("📊 开始生成可视化结果")
+    print("="*80)
+    
+    # 创建可视化工具实例
+    visualizer = StockVisualizer(save_path='./stock_analysis_results')
+    
+    # 1. 可视化Top 30股票
+    print("正在生成Top 30股票图表...")
+    visualizer.plot_top_stocks(result_df, n=30, title=f"{USE_INDEX.upper()} Top 30 股票预测结果")
+    
+    # 2. 可视化倒数Top 10股票
+    print("正在生成倒数Top 10股票图表...")
+    visualizer.plot_bottom_stocks(result_df_lose, n=10, title=f"{USE_INDEX.upper()} 倒数 Top 10 股票")
+    
+    # 3. 可视化特征重要性
+    print("正在生成特征重要性图表...")
+    visualizer.plot_feature_importance(importance, n=20, title=f"{USE_INDEX.upper()} 特征重要性 Top 20")
+    
+    # 4. 可视化大模型分析结果
+    print("正在生成大模型分析图表...")
+    visualizer.plot_llm_analysis_summary(analysis_result, title="大模型分析结果摘要")
+    
+    # 5. 创建综合仪表板
+    print("正在生成综合仪表板...")
+    visualizer.plot_comprehensive_dashboard(result_df, result_df_lose, importance, analysis_result, USE_INDEX)
+    
+    # 6. 生成HTML报告
+    print("正在生成HTML报告...")
+    visualizer.generate_html_report(result_df, result_df_lose, importance, analysis_result, USE_INDEX)
+    
+    print(f"\n✅ 所有可视化结果已保存到: ./stock_analysis_results/")
+    print("   包括: PNG图片、HTML报告、完整分析文本")
+    print("="*80)
+
 
 if __name__ == "__main__":
     main()
