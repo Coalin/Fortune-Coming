@@ -276,7 +276,7 @@ class StockVisualizer:
     
     def plot_comprehensive_dashboard(self, top_df, bottom_df, feature_importance_dict, llm_analysis, 
                                     use_index="hs300"):
-        """创建综合仪表板"""
+        """创建综合仪表板 - 修复版本"""
         fig = plt.figure(figsize=(20, 16))
         fig.suptitle(f'股票分析综合仪表板 ({use_index.upper()})', fontsize=20, fontweight='bold')
         
@@ -285,103 +285,147 @@ class StockVisualizer:
         
         # 1. Top 5 股票得分
         ax1 = fig.add_subplot(gs[0, 0])
-        top5 = top_df.head(5)
-        bars1 = ax1.bar(range(len(top5)), top5['加权得分'], color=self.colors['buy'])
-        ax1.set_xticks(range(len(top5)))
-        ax1.set_xticklabels(top5['股票代码'], rotation=45, fontsize=9)
-        ax1.set_ylabel('得分')
-        ax1.set_title('Top 5 股票')
-        ax1.grid(True, alpha=0.3, axis='y')
+        if not top_df.empty:
+            top5 = top_df.head(5)
+            bars1 = ax1.bar(range(len(top5)), top5['加权得分'], color=self.colors['buy'])
+            ax1.set_xticks(range(len(top5)))
+            ax1.set_xticklabels(top5['股票代码'], rotation=45, fontsize=9)
+            ax1.set_ylabel('得分')
+            ax1.set_title('Top 5 股票')
+            ax1.grid(True, alpha=0.3, axis='y')
+        else:
+            ax1.text(0.5, 0.5, '无Top股票数据', ha='center', va='center', fontsize=12)
+            ax1.set_title('Top 5 股票（无数据）')
+            ax1.set_axis_off()
         
         # 2. Bottom 5 股票得分
         ax2 = fig.add_subplot(gs[0, 1])
-        bottom5 = bottom_df.head(5)
-        bars2 = ax2.bar(range(len(bottom5)), bottom5['加权得分'], color=self.colors['sell'])
-        ax2.set_xticks(range(len(bottom5)))
-        ax2.set_xticklabels(bottom5['股票代码'], rotation=45, fontsize=9)
-        ax2.set_ylabel('得分')
-        ax2.set_title('Bottom 5 股票')
-        ax2.grid(True, alpha=0.3, axis='y')
+        if not bottom_df.empty:
+            bottom5 = bottom_df.head(5)
+            bars2 = ax2.bar(range(len(bottom5)), bottom5['加权得分'], color=self.colors['sell'])
+            ax2.set_xticks(range(len(bottom5)))
+            ax2.set_xticklabels(bottom5['股票代码'], rotation=45, fontsize=9)
+            ax2.set_ylabel('得分')
+            ax2.set_title('Bottom 5 股票')
+            ax2.grid(True, alpha=0.3, axis='y')
+        else:
+            ax2.text(0.5, 0.5, '无Bottom股票数据', ha='center', va='center', fontsize=12)
+            ax2.set_title('Bottom 5 股票（无数据）')
+            ax2.set_axis_off()
         
         # 3. 特征重要性前10
         ax3 = fig.add_subplot(gs[0, 2])
         if feature_importance_dict:
+            # 创建DataFrame并排序
             importance_df = pd.DataFrame(list(feature_importance_dict.items()), 
                                         columns=['Feature', 'Importance'])
             importance_df = importance_df.sort_values('Importance', ascending=False).head(10)
-            ax3.barh(range(len(importance_df)), importance_df['Importance'], 
-                    color=plt.cm.tab20c(np.linspace(0, 1, len(importance_df))))
-            ax3.set_yticks(range(len(importance_df)))
-            ax3.set_yticklabels(importance_df['Feature'], fontsize=8)
-            ax3.set_xlabel('重要性')
-            ax3.set_title('特征重要性 Top 10')
-            ax3.invert_yaxis()
+            
+            if not importance_df.empty:
+                ax3.barh(range(len(importance_df)), importance_df['Importance'], 
+                        color=plt.cm.tab20c(np.linspace(0, 1, len(importance_df))))
+                ax3.set_yticks(range(len(importance_df)))
+                ax3.set_yticklabels(importance_df['Feature'], fontsize=8)
+                ax3.set_xlabel('重要性')
+                ax3.set_title('特征重要性 Top 10')
+                ax3.invert_yaxis()
+            else:
+                ax3.text(0.5, 0.5, '无特征重要性数据', ha='center', va='center', fontsize=12)
+                ax3.set_title('特征重要性（无数据）')
+                ax3.set_axis_off()
+        else:
+            ax3.text(0.5, 0.5, '无特征重要性数据', ha='center', va='center', fontsize=12)
+            ax3.set_title('特征重要性（无数据）')
+            ax3.set_axis_off()
         
         # 4. 得分分布直方图
         ax4 = fig.add_subplot(gs[1, 0])
         all_scores = pd.concat([top_df['加权得分'], bottom_df['加权得分']])
-        ax4.hist(all_scores, bins=30, alpha=0.7, color=self.colors['primary'], 
-                edgecolor='black', density=True)
-        ax4.set_xlabel('得分')
-        ax4.set_ylabel('密度')
-        ax4.set_title('所有股票得分分布')
-        ax4.grid(True, alpha=0.3)
+        if not all_scores.empty:
+            ax4.hist(all_scores, bins=30, alpha=0.7, color=self.colors['primary'], 
+                    edgecolor='black', density=True)
+            ax4.set_xlabel('得分')
+            ax4.set_ylabel('密度')
+            ax4.set_title('所有股票得分分布')
+            ax4.grid(True, alpha=0.3)
+        else:
+            ax4.text(0.5, 0.5, '无得分数据', ha='center', va='center', fontsize=12)
+            ax4.set_title('得分分布（无数据）')
+            ax4.set_axis_off()
         
         # 5. 得分箱线图
         ax5 = fig.add_subplot(gs[1, 1])
-        data_to_plot = [top_df['加权得分'].values, bottom_df['加权得分'].values]
-        bp = ax5.boxplot(data_to_plot, labels=['Top', 'Bottom'], patch_artist=True)
-        colors = [self.colors['buy'], self.colors['sell']]
-        for patch, color in zip(bp['boxes'], colors):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.7)
-        ax5.set_ylabel('得分')
-        ax5.set_title('Top vs Bottom 得分对比')
-        ax5.grid(True, alpha=0.3, axis='y')
+        if not top_df.empty and not bottom_df.empty:
+            data_to_plot = [top_df['加权得分'].values, bottom_df['加权得分'].values]
+            bp = ax5.boxplot(data_to_plot, labels=['Top', 'Bottom'], patch_artist=True)
+            colors = [self.colors['buy'], self.colors['sell']]
+            for patch, color in zip(bp['boxes'], colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+            ax5.set_ylabel('得分')
+            ax5.set_title('Top vs Bottom 得分对比')
+            ax5.grid(True, alpha=0.3, axis='y')
+        else:
+            ax5.text(0.5, 0.5, '数据不足，无法比较', ha='center', va='center', fontsize=12)
+            ax5.set_title('得分对比（无数据）')
+            ax5.set_axis_off()
         
         # 6. 大模型分析摘要
         ax6 = fig.add_subplot(gs[1, 2])
         ax6.axis('off')
-        summary_lines = []
-        for line in llm_analysis.split('\n'):
-            if any(keyword in line for keyword in ['建议', '评级', '目标价', '仓位', '风险']):
-                summary_lines.append(line.strip())
-                if len(summary_lines) >= 8:
-                    break
-        
-        summary_text = '\n'.join(summary_lines[:8])
-        ax6.text(0.1, 0.9, '大模型分析摘要:', fontsize=10, fontweight='bold', 
-                transform=ax6.transAxes)
-        ax6.text(0.1, 0.7, summary_text, fontsize=8, transform=ax6.transAxes,
-                verticalalignment='top')
+        if llm_analysis:
+            summary_lines = []
+            for line in llm_analysis.split('\n'):
+                if any(keyword in line for keyword in ['建议', '评级', '目标价', '仓位', '风险']):
+                    summary_lines.append(line.strip())
+                    if len(summary_lines) >= 8:
+                        break
+            
+            if summary_lines:
+                summary_text = '\n'.join(summary_lines[:8])
+                ax6.text(0.1, 0.9, '大模型分析摘要:', fontsize=10, fontweight='bold', 
+                        transform=ax6.transAxes)
+                ax6.text(0.1, 0.7, summary_text, fontsize=8, transform=ax6.transAxes,
+                        verticalalignment='top')
+            else:
+                ax6.text(0.5, 0.5, '无有效摘要', ha='center', va='center', fontsize=12)
+        else:
+            ax6.text(0.5, 0.5, '无大模型分析结果', ha='center', va='center', fontsize=12)
         
         # 7. 得分热力图（Top 20）
         ax7 = fig.add_subplot(gs[2, :])
-        top20 = top_df.head(20)
-        score_matrix = np.zeros((3, len(top20)))  # 3行：得分、D1得分、D2得分
-        
-        for i, row in top20.iterrows():
-            score_matrix[0, i] = row['加权得分']
-            # 尝试获取每日得分
-            for d in [1, 2]:
-                col_name = f'D{d}得分'
-                if col_name in row:
-                    score_matrix[d, i] = row[col_name]
-        
-        im = ax7.imshow(score_matrix, aspect='auto', cmap='RdYlGn')
-        ax7.set_xticks(range(len(top20)))
-        ax7.set_xticklabels(top20['股票代码'], rotation=45, fontsize=8)
-        ax7.set_yticks(range(3))
-        ax7.set_yticklabels(['加权得分', 'D1得分', 'D2得分'])
-        ax7.set_title('Top 20 股票得分热力图')
-        
-        # 添加颜色条
-        cbar = plt.colorbar(im, ax=ax7, shrink=0.8)
-        cbar.set_label('得分')
-        
-        # 添加网格
-        ax7.grid(False)
-        ax7.set_axisbelow(False)
+        if not top_df.empty:
+            n_display = min(20, len(top_df))
+            top_display = top_df.head(n_display)
+            
+            # 创建矩阵，行数固定为3，列数为实际显示的数量
+            score_matrix = np.zeros((3, n_display))
+            
+            # 使用enumerate获取连续索引
+            for idx, (_, row) in enumerate(top_display.iterrows()):
+                if idx >= n_display:  # 安全保护
+                    break
+                score_matrix[0, idx] = row['加权得分']
+                # 尝试获取每日得分
+                for d in [1, 2]:
+                    col_name = f'D{d}得分'
+                    if col_name in row:
+                        score_matrix[d, idx] = row[col_name]
+            
+            im = ax7.imshow(score_matrix, aspect='auto', cmap='RdYlGn')
+            ax7.set_xticks(range(n_display))
+            ax7.set_xticklabels(top_display['股票代码'], rotation=45, fontsize=8)
+            ax7.set_yticks(range(3))
+            ax7.set_yticklabels(['加权得分', 'D1得分', 'D2得分'])
+            ax7.set_title(f'Top {n_display} 股票得分热力图')
+            
+            # 添加颜色条
+            cbar = plt.colorbar(im, ax=ax7, shrink=0.8)
+            cbar.set_label('得分')
+        else:
+            ax7.text(0.5, 0.5, '无Top股票数据', ha='center', va='center', fontsize=12)
+            ax7.set_title('Top 股票得分热力图（无数据）')
+            ax7.set_axis_off()
         
         # 调整布局
         plt.tight_layout()
@@ -457,8 +501,8 @@ class StockVisualizer:
                 <th>加权得分</th>
             </tr>""")
         
-        # 添加Top 10行
-        for i, (_, row) in enumerate(top_df.head(10).iterrows(), 1):
+        # 添加Top 30行
+        for i, (_, row) in enumerate(top_df.head(30).iterrows(), 1):
             html_parts.append(f"""
             <tr>
                 <td>{i}</td>
@@ -470,12 +514,12 @@ class StockVisualizer:
         html_parts.append("""
         </table>
         
-        <h2>📉 倒数 Top 5 股票</h2>
+        <h2>📉 倒数 Top 10 股票</h2>
         <table>
             <tr><th>排名</th><th>股票代码</th><th>股票名称</th><th>加权得分</th></tr>""")
         
         # 添加Bottom 5行
-        for i, (_, row) in enumerate(bottom_df.head(5).iterrows(), 1):
+        for i, (_, row) in enumerate(bottom_df.head(10).iterrows(), 1):
             html_parts.append(f"""
             <tr>
                 <td>{i}</td>
