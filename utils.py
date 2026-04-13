@@ -669,6 +669,7 @@ def get_llm_analysis(top_stocks_df, n=3):
     当前日期：{datetime.now().strftime('%Y-%m-%d')}
     分析师：Dr. Fan Zhang, Goldman Sachs Equity Research
     任务：对以下{len(top_stocks_df)}只股票进行深度分析，提供投资建议
+    1000字以内
 
     股票列表：
     {stocks_str}

@@ -12,7 +12,7 @@ from sklearn.preprocessing import RobustScaler
 from visualizer import StockVisualizer
 
 
-USE_INDEX = "zz500"  # 开关变量，可选值: "hs300" (沪深300) 或 "zz500" (中证500)
+USE_INDEX = "hs300"  # 开关变量，可选值: "hs300" (沪深300) 或 "zz500" (中证500)
 
 # 动态标签生成函数
 def generate_dynamic_label(stock_return, index_return, potential_drawdown, lookback_window=20):
@@ -25,8 +25,8 @@ def generate_dynamic_label(stock_return, index_return, potential_drawdown, lookb
     print(f"\n=== 标签生成调试 ===")
     print(f"总样本数: {len(stock_return)}")
     print(f"收益率分布:")
-    print(f"  >5%: {(stock_return > 0.05).mean():.2%}")
-    print(f"  -5%-5%: {((stock_return > -0.05) & (stock_return <= 0.05)).mean():.2%}")
+    print(f"  >10%: {(stock_return > 0.10).mean():.2%}")
+    print(f"  -5%-10%: {((stock_return > -0.05) & (stock_return <= 0.10)).mean():.2%}")
     print(f"  <=-5%: {(stock_return <= -0.05).mean():.2%}")
     
     # 计算波动率惩罚
@@ -35,7 +35,7 @@ def generate_dynamic_label(stock_return, index_return, potential_drawdown, lookb
     
     # 生成标签
     labels = np.where(
-        (stock_return > 0.05) & (~high_volatility), 1,
+        (stock_return > 0.1) & (~high_volatility), 1,
         np.where(stock_return <= -0.05, 0, np.nan)
     )
     
@@ -47,7 +47,7 @@ def generate_dynamic_label(stock_return, index_return, potential_drawdown, lookb
     return labels
 
 # 回测评估函数
-def backtest_evaluation(results_df, pred_proba, true_return, index_return, top_pct=0.1, holding_period=7):
+def backtest_evaluation(results_df, pred_proba, true_return, index_return, top_pct=0.1, holding_period=14):
     """
     综合回测评估：包含夏普比率、特雷诺比率
     """
@@ -245,36 +245,36 @@ def main():
         df = add_momentum_features(df, index_close=index_data['close'])
 
         if is_training:
-            lookahead_days = 7
+            lookahead_days = 14
             
-            # 计算未7天的最高价、最低价、最终价
-            df['未来7日最高价'] = df['收盘'].rolling(window=lookahead_days, min_periods=1).max().shift(-lookahead_days)
-            df['未来7日最低价'] = df['收盘'].rolling(window=lookahead_days, min_periods=1).min().shift(-lookahead_days)
-            df['未来7日收盘价'] = df['收盘'].shift(-lookahead_days)  # 未来7天后的收盘价
+            # 计算未14天的最高价、最低价、最终价
+            df['未来14日最高价'] = df['收盘'].rolling(window=lookahead_days, min_periods=1).max().shift(-lookahead_days)
+            df['未来14日最低价'] = df['收盘'].rolling(window=lookahead_days, min_periods=1).min().shift(-lookahead_days)
+            df['未来14日收盘价'] = df['收盘'].shift(-lookahead_days)  # 未来14天后的收盘价
             
             # 保留原始数据长度
             df = df.iloc[:-lookahead_days]
             
             # 计算三种收益率
             # 1. 最大潜在收益率（最佳情况）
-            df['未来7日最高收益'] = df['未来7日最高价'] / df['收盘'] - 1
+            df['未来14日最高收益'] = df['未来14日最高价'] / df['收盘'] - 1
             
             # 2. 实际持有收益率（最终收益）
-            df['未来7日收益'] = df['未来7日收盘价'] / df['收盘'] - 1
+            df['未来14日收益'] = df['未来14日收盘价'] / df['收盘'] - 1
             
             # 3. 最大回撤（最坏情况）
-            df['未来7日最低收益'] = df['未来7日最低价'] / df['收盘'] - 1
-            df['潜在回撤'] = df['未来7日最低收益']
+            df['未来14日最低收益'] = df['未来14日最低价'] / df['收盘'] - 1
+            df['潜在回撤'] = df['未来14日最低收益']
             
             # 删除包含NaN的行
-            df = df.dropna(subset=['未来7日最高收益', '未来7日收益', '未来7日最低收益'])
+            df = df.dropna(subset=['未来14日最高收益', '未来14日收益', '未来14日最低收益'])
             
             # 添加额外指标
             # 4. 波动幅度（最高-最低）/当前
-            df['未来7日波动幅度'] = (df['未来7日最高价'] - df['未来7日最低价']) / df['收盘']
+            df['未来14日波动幅度'] = (df['未来14日最高价'] - df['未来14日最低价']) / df['收盘']
             
             # 5. 收益风险比
-            df['未来7日收益风险比'] = df['未来7日收益'].abs() / (df['潜在回撤'].abs() + 0.001)  # 防止除以0
+            df['未来14日收益风险比'] = df['未来14日收益'].abs() / (df['潜在回撤'].abs() + 0.001)  # 防止除以0
         
         return df
 
@@ -282,9 +282,9 @@ def main():
     hs300_data = ak.stock_zh_index_daily(symbol="sh000300")
     hs300_data['date'] = pd.to_datetime(hs300_data['date'])
     hs300_data = hs300_data.set_index('date').sort_index()
-    hs300_data['未来收盘价'] = hs300_data['close'].shift(-10)
+    hs300_data['未来收盘价'] = hs300_data['close'].shift(-14)
     hs300_data = hs300_data.dropna(subset=['未来收盘价'])
-    hs300_data['未来7日收益'] = hs300_data['未来收盘价'] / hs300_data['close'] - 1
+    hs300_data['未来14日收益'] = hs300_data['未来收盘价'] / hs300_data['close'] - 1
 
     # 获取训练数据
     print("\n获取训练数据...")
@@ -318,7 +318,7 @@ def main():
     # 合并股票和大盘数据
     merged_train = pd.merge(
         train_df.reset_index(),
-        hs300_data[['未来7日收益']].reset_index(),
+        hs300_data[['未来14日收益']].reset_index(),
         left_on='日期',
         right_on='date',
         how='inner'
@@ -329,8 +329,8 @@ def main():
 
     # 动态生成标签
     merged_train['label'] = generate_dynamic_label(
-        merged_train['未来7日收益_x'],
-        merged_train['未来7日收益_y'],
+        merged_train['未来14日收益_x'],
+        merged_train['未来14日收益_y'],
         merged_train['潜在回撤']
     )
 
@@ -462,13 +462,13 @@ def main():
         val_results['实际标签'] = y_val
         val_results['预测概率'] = y_proba
         val_results['预测标签'] = y_pred
-        val_results['未来7日收益_x'] = merged_train.iloc[val_idx]['未来7日收益_x']
-        val_results['未来7日收益_y'] = merged_train.iloc[val_idx]['未来7日收益_y']
+        val_results['未来14日收益_x'] = merged_train.iloc[val_idx]['未来14日收益_x']
+        val_results['未来14日收益_y'] = merged_train.iloc[val_idx]['未来14日收益_y']
         
         # 执行回测
         bt_result = backtest_evaluation(
             val_results, y_proba, 
-            '未来7日收益_x', '未来7日收益_y'
+            '未来14日收益_x', '未来14日收益_y'
         )
         cv_results.append(bt_result)
         
@@ -754,7 +754,7 @@ def main():
             # 输出结果
             print(f"{date_str}: {top_stock['symbol']} ({name_map.get(top_stock['symbol'], '未知')}), "
                   f"预测概率: {probas[top_idx]:.4f}, "
-                  f"实际7日收益: {top_stock['未来7日收益_x']:.2%}")
+                  f"实际14日收益: {top_stock['未来14日收益_x']:.2%}")
         except Exception as e:
             print(f"处理 {date_str} 时出错: {str(e)}")
 
