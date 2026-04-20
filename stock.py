@@ -3,13 +3,14 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import (roc_auc_score, precision_score, 
+from sklearn.metrics import (roc_auc_score, precision_score,
                             recall_score, confusion_matrix)
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from utils import *
 from sklearn.preprocessing import RobustScaler
 from visualizer import StockVisualizer
+from logger import init_logger, close_logger, get_logger
 
 
 USE_INDEX = "hs300"  # 开关变量，可选值: "hs300" (沪深300) 或 "zz500" (中证500)
@@ -108,13 +109,15 @@ def backtest_evaluation(results_df, pred_proba, true_return, index_return, top_p
     }
 
 def main():
-    # 设置时间窗口
+    log = get_logger()
+    log.section("数据准备阶段")
+
     end_date = get_valid_date()
     train_end_date = end_date - timedelta(days=20)
     train_start_date = end_date - timedelta(days=2000)
     predict_start_date = end_date - timedelta(days=60)
     predict_end_date = end_date
-    
+
     print(f"训练数据时间窗口: {train_start_date.strftime('%Y%m%d')} - {train_end_date.strftime('%Y%m%d')}")
     print(f"推理数据时间窗口: {predict_start_date.strftime('%Y%m%d')} - {predict_end_date.strftime('%Y%m%d')}")
 
@@ -287,6 +290,7 @@ def main():
     hs300_data['未来14日收益'] = hs300_data['未来收盘价'] / hs300_data['close'] - 1
 
     # 获取训练数据
+    log.subsection("训练数据获取")
     print("\n获取训练数据...")
     train_features = []
     # 测试修改
@@ -358,7 +362,8 @@ def main():
     # 时间序列交叉验证
     tscv = TimeSeriesSplit(n_splits=10)
     cv_results = []
-    
+
+    log.subsection("模型交叉验证训练")
     for fold, (train_idx, val_idx) in enumerate(tscv.split(merged_train)):
         print(f"\n正在训练第 {fold+1} 折...")
         
@@ -492,7 +497,7 @@ def main():
     print(f"平均超额收益: {avg_excess_return:.2%}")
     print(f"平均胜率: {avg_win_rate:.2%}")
 
-    # 使用全部数据训练最终模型
+    log.subsection("最终模型训练")
     print("\n准备最终模型训练数据...")
     
     # 数据预处理
@@ -536,6 +541,7 @@ def main():
     )
 
     # 获取最新数据用于推理
+    log.subsection("推理预测")
     print("\n获取最新数据用于推理...")
     predict_features = []
     count = 0  # 添加计数器变量
@@ -655,7 +661,7 @@ def main():
     print("\n倒数Top 10预测结果（基于最新数据）: ")
     print(result_df_lose.to_string(index=False, float_format="%.4f"))
 
-    # 在main()函数调用
+    log.subsection("大模型技术分析")
     print("\n" + "="*80)
     print("📈 大模型技术分析建议")
     print("="*80)
@@ -760,8 +766,8 @@ def main():
 
     # 获取特征重要性
     importance = final_model.get_booster().get_score(importance_type='weight')
-    
-    # 初始化可视化工具
+
+    log.section("可视化结果生成")
     print("\n" + "="*80)
     print("📊 开始生成可视化结果")
     print("="*80)
@@ -799,4 +805,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    log = init_logger(log_dir='./logs')
+    try:
+        main()
+    finally:
+        close_logger()

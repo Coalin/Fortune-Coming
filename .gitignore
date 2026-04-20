@@ -1,3 +1,6 @@
+# 日志
+logs/
+
 # 敏感文件
 config.py
 *.pyc
