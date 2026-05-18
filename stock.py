@@ -1,3 +1,4 @@
+import os
 import akshare as ak
 import pandas as pd
 import numpy as np
@@ -13,7 +14,18 @@ from visualizer import StockVisualizer
 from logger import init_logger, close_logger, get_logger
 
 
-USE_INDEX = "hs300"  # 开关变量，可选值: "hs300" (沪深300) 或 "zz500" (中证500)
+import argparse
+
+parser = argparse.ArgumentParser(description='量化选股系统')
+parser.add_argument('--index', type=str, default='hs300',
+                    choices=['hs300', 'zz500'],
+                    help='选择指数: hs300 (沪深300) 或 zz500 (中证500)，默认 hs300')
+parser.add_argument('--n', type=int, default=None,
+                    help='测试模式：只处理N只股票，用于快速测试，默认None(处理全部)')
+args = parser.parse_args()
+
+USE_INDEX = args.index
+TEST_N = args.n
 
 # 动态标签生成函数
 def generate_dynamic_label(stock_return, index_return, potential_drawdown, lookback_window=20):
@@ -27,17 +39,17 @@ def generate_dynamic_label(stock_return, index_return, potential_drawdown, lookb
     print(f"总样本数: {len(stock_return)}")
     print(f"收益率分布:")
     print(f"  >10%: {(stock_return > 0.10).mean():.2%}")
-    print(f"  -5%-10%: {((stock_return > -0.05) & (stock_return <= 0.10)).mean():.2%}")
-    print(f"  <=-5%: {(stock_return <= -0.05).mean():.2%}")
-    
+    print(f"  -3%-10%: {((stock_return > -0.03) & (stock_return <= 0.10)).mean():.2%}")
+    print(f"  <=-3%: {(stock_return <= -0.03).mean():.2%}")
+
     # 计算波动率惩罚
     if 'potential_drawdown' in locals():
         print(f"回撤>10%: {(potential_drawdown <= -0.10).mean():.2%}")
-    
+
     # 生成标签
     labels = np.where(
         (stock_return > 0.1) & (~high_volatility), 1,
-        np.where(stock_return <= -0.05, 0, np.nan)
+        np.where(stock_return <= -0.03, 0, np.nan)
     )
     
     print(f"最终标签分布:")
@@ -185,7 +197,9 @@ def main():
         
         # 其他技术指标
         df['ATR'] = calculate_atr(high, low, close)
-        df['OBV'] = calculate_obv(close, volume)
+        obv_features = calculate_obv_features(close, volume)
+        for k, v in obv_features.items():
+            df[k] = v
         df['CCI'] = calculate_cci(high, low, close)
         df['VOLATILITY'] = close.pct_change().rolling(20).std().ffill()
         
@@ -293,14 +307,17 @@ def main():
     log.subsection("训练数据获取")
     print("\n获取训练数据...")
     train_features = []
-    # 测试修改
-    for symbol in symbols[:500]: 
+    raw_data_cache = {}  # 缓存原始数据，避免推理时重复获取
+    n_stocks = TEST_N if TEST_N else 500
+    print(f"{'测试模式' if TEST_N else '生产模式'}: 处理 {n_stocks} 只股票")
+    for symbol in symbols[:n_stocks]: 
         try:
             df = safe_get_stock_data(
                 symbol=symbol,
                 start_date=train_start_date.strftime('%Y%m%d'),
                 end_date=train_end_date.strftime('%Y%m%d')
             )
+            raw_data_cache[symbol] = df  # 缓存原始数据
 
             processed = process_data(df, hs300_data, is_training=True)
             # processed = check_data_quality(processed)
@@ -343,9 +360,10 @@ def main():
     merged_train['label'] = merged_train['label'].astype(int)
 
     # 更新特征列定义
-    feature_cols = ['MA5', 'MA10', 'MA20', 'MA30', 'RSI', 'MACD', 'MACD_Signal', 
+    feature_cols = ['MA5', 'MA10', 'MA20', 'MA30', 'RSI', 'MACD', 'MACD_Signal',
                 'BOLL_upper', 'BOLL_mid', 'BOLL_lower',
-                'ATR', 'OBV', 'CCI', 'VOLATILITY',
+                'ATR', 'OBV', 'OBV_Change', 'OBV_vs_MA', 'OBV_Slope', 'OBV_Divergence_Low',
+                'CCI', 'VOLATILITY',
                 'INDUSTRY_RS', 'PV_DIVERGENCE', 'VOL_RATIO',
                 'Momentum_Accel', 'Volume_Price_Resonance', 'Volatility_Squeeze_Break', 'SmartMoneyFlow',
                 'TrendPersistence', 'VolumeSpike', 'FIB_0.236', 'FIB_0.382', 'FIB_0.618',
@@ -418,21 +436,21 @@ def main():
         # 训练模型
         model = xgb.XGBClassifier(
             objective='binary:logistic',
-            n_estimators=8000,
-            max_depth=3,  # 减小深度防止过拟合
+            n_estimators=6000,
+            max_depth=3,
             learning_rate=0.2,
             subsample=0.5,
-            colsample_bytree=0.5,
-            reg_alpha=10,  # 增强L1正则化
-            reg_lambda=10,  # 增强L2正则化
-            min_child_weight=10,  # 防止过小的叶节点
-            max_bin=16,  # 限制分箱数
-            tree_method='hist',  # 使用直方图算法
+            colsample_bytree=0.3,
+            reg_alpha=20,
+            reg_lambda=20,
+            min_child_weight=20,
+            max_bin=16,
+            tree_method='hist',
             random_state=2025,
-            early_stopping_rounds=500,
+            early_stopping_rounds=400,
             eval_metric=['logloss', 'auc'],
             enable_categorical=False,
-            missing=np.nan  # 显式处理缺失值
+            missing=np.nan
         )
         
         model.fit(
@@ -515,47 +533,83 @@ def main():
     print(f"剩余缺失值数量: {X_final.isna().sum().sum()}")
     print(f"无限大值数量: {np.isinf(X_final).sum().sum()}")
 
-    # 训练最终模型
+    # ========== 特征选择：先用全部特征训练获取重要性 ==========
+    print("\n特征选择：训练临时模型获取特征重要性...")
+    temp_model = xgb.XGBClassifier(
+            objective='binary:logistic',
+            n_estimators=3000,
+            max_depth=3,
+            learning_rate=0.2,
+            subsample=0.5,
+            colsample_bytree=0.3,
+            reg_alpha=20,
+            reg_lambda=20,
+            min_child_weight=20,
+            max_bin=16,
+            tree_method='hist',
+            random_state=2025,
+            enable_categorical=False,
+            missing=np.nan
+    )
+    temp_model.fit(X_final, y_final, verbose=False)
+
+    # 获取特征重要性
+    importance = temp_model.get_booster().get_score(importance_type='weight')
+    sorted_importance = sorted(importance.items(), key=lambda x: x[1], reverse=True)
+
+    print(f"共有 {len(sorted_importance)} 个特征")
+    print("\n特征重要性 (全部，按重要性排序):")
+    for i, (feat, imp) in enumerate(sorted_importance, 1):
+        print(f"  {i:3d}. {feat}: {imp:.0f}")
+
+    # 选择 Top 50 特征
+    TOP_N_FEATURES = 50
+    selected_features = [feat for feat, _ in sorted_importance[:TOP_N_FEATURES]]
+    print(f"\n✅ 选择 Top {TOP_N_FEATURES} 特征进行最终训练")
+
+    # 使用选中的特征重新构建训练数据
+    X_final_selected = X_final[selected_features]
+    print(f"特征维度: {X_final.shape[1]} → {X_final_selected.shape[1]}")
+
+    # ========== 使用选中特征训练最终模型 ==========
     print("\n训练最终模型...")
     final_model = xgb.XGBClassifier(
             objective='binary:logistic',
-            n_estimators=8000,
-            max_depth=3,  # 减小深度防止过拟合
+            n_estimators=3000,
+            max_depth=3,
             learning_rate=0.2,
             subsample=0.5,
-            colsample_bytree=0.5,
-            reg_alpha=10,  # 增强L1正则化
-            reg_lambda=10,  # 增强L2正则化
-            min_child_weight=10,  # 防止过小的叶节点
-            max_bin=16,  # 限制分箱数
-            tree_method='hist',  # 使用直方图算法
+            colsample_bytree=0.3,
+            reg_alpha=20,
+            reg_lambda=20,
+            min_child_weight=20,
+            max_bin=16,
+            tree_method='hist',
             random_state=2025,
             enable_categorical=False,
-            missing=np.nan  # 显式处理缺失值
+            missing=np.nan
     )
 
     final_model.fit(
-        X_final, 
+        X_final_selected,
         y_final,
         verbose=50
     )
 
-    # 获取最新数据用于推理
+    # 获取最新数据用于推理（使用缓存的原始数据）
     log.subsection("推理预测")
-    print("\n获取最新数据用于推理...")
+    print("\n使用缓存数据用于推理...")
     predict_features = []
-    count = 0  # 添加计数器变量
-    # 测试修改
-    for symbol in symbols[:500]:
+    cache_hits = 0
+    cache_misses = 0
+    for symbol in symbols[:n_stocks]:
         try:
-            count += 1
-            if count > 1 and count % 10 == 0:  # 修复这里：使用count代替i
-                time.sleep(2)
-            df = safe_get_stock_data(
-                symbol=symbol,
-                start_date=train_start_date.strftime('%Y%m%d'),
-                end_date=train_end_date.strftime('%Y%m%d')
-            )
+            df = raw_data_cache.get(symbol)
+            if df is None:
+                cache_misses += 1
+                continue
+            cache_hits += 1
+            
             if len(df) < 30:
                 print(f"推理数据跳过 {symbol} ({name_map.get(symbol, '未知')}): 数据不足 ({len(df)}天)")
                 continue
@@ -565,10 +619,12 @@ def main():
                 processed = processed.tail(3)
                 processed['symbol'] = symbol
                 predict_features.append(processed)
-                print(f"\r已处理 {len(predict_features)}/{len(symbols)}", end="")
+                print(f"\r已处理 {len(predict_features)}/{len(symbols)} (缓存命中:{cache_hits})", end="")
                 
         except Exception as e:
             print(f"推理数据跳过 {symbol} ({name_map.get(symbol, '未知')}): {str(e)}")
+
+    print(f"\n缓存命中: {cache_hits}, 缓存未命中: {cache_misses}")
 
     if not predict_features:
         raise ValueError("没有获取到任何有效推理数据")
@@ -577,8 +633,8 @@ def main():
     predict_df = pd.concat(predict_features).set_index('日期')
     print(f"\n成功处理 {len(predict_df)} 只股票的最新数据")
 
-    # 预测前处理推理数据
-    X_predict = predict_df[feature_cols].copy()
+    # 预测前处理推理数据（使用Top 35特征）
+    X_predict = predict_df[selected_features].copy()
     X_predict = X_predict.replace([np.inf, -np.inf], np.nan)
     X_predict = X_predict.fillna(medians)  # 使用训练集中位数填充
     X_predict = X_predict.clip(-1e10, 1e10)
@@ -604,8 +660,8 @@ def main():
         else:
             weights = [1.0]  # 1天权重
         
-        # 准备特征数据
-        X_recent = recent_data[feature_cols].copy()
+        # 准备特征数据（使用Top 35特征）
+        X_recent = recent_data[selected_features].copy()
         X_recent = X_recent.replace([np.inf, -np.inf], np.nan)
         X_recent = X_recent.fillna(medians)
         X_recent = X_recent.clip(-1e10, 1e10)
@@ -744,8 +800,8 @@ def main():
                 print(f"未找到 {date_str} 的数据")
                 continue
                 
-            # 准备特征数据
-            X_date = date_data[feature_cols].copy()
+            # 准备特征数据（使用Top 35特征）
+            X_date = date_data[selected_features].copy()
             X_date = X_date.replace([np.inf, -np.inf], np.nan)
             X_date = X_date.fillna(medians)  # 使用训练集中位数填充
             X_date = X_date.clip(-1e10, 1e10)
@@ -801,6 +857,36 @@ def main():
     
     print(f"\n✅ 所有可视化结果已保存到: ./stock_analysis_results/")
     print("   包括: PNG图片、HTML报告、完整分析文本")
+    print("="*80)
+
+    log.section("保存Excel结果")
+    print("\n" + "="*80)
+    print("📁 保存预测结果到Excel")
+    print("="*80)
+
+    try:
+        excel_dir = f'./logs/{datetime.now().strftime("%Y-%m-%d")}'
+        os.makedirs(excel_dir, exist_ok=True)
+
+        excel_file = os.path.join(excel_dir, f'预测结果_{USE_INDEX.upper()}_{datetime.now().strftime("%H%M%S")}.xlsx')
+
+        with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
+            result_df.to_excel(writer, sheet_name='Top30预测', index=False)
+            result_df_lose.to_excel(writer, sheet_name='倒数Top10', index=False)
+
+            if 'detailed_df' in dir():
+                detailed_df.to_excel(writer, sheet_name='详细数据', index=False)
+
+            if 'predict_df' in dir():
+                predict_df.to_excel(writer, sheet_name='预测数据', index=False)
+
+        print(f"✅ 预测结果已保存到: {excel_file}")
+    except ImportError:
+        print("⚠️ openpyxl未安装，Excel保存跳过")
+        print("   如需保存Excel，请运行: pip install openpyxl")
+    except Exception as e:
+        print(f"⚠️ Excel保存失败: {str(e)}")
+
     print("="*80)
 
 

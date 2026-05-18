@@ -178,6 +178,34 @@ def calculate_obv(close, volume):
     return (np.sign(close.diff()) * volume).ffill().cumsum().fillna(0)
 
 
+def calculate_obv_features(close, volume, window=20):
+    """基于OBV的衍生特征"""
+    obv = calculate_obv(close, volume)
+    price = pd.to_numeric(close, errors='coerce')
+
+    features = {}
+    features['OBV'] = obv
+
+    features['OBV_Change'] = obv.pct_change(window).fillna(0)
+
+    obv_ma = obv.rolling(window).mean()
+    features['OBV_vs_MA'] = (obv / obv_ma - 1).fillna(0)
+
+    price_slope = pd.Series(index=price.index)
+    for i in range(window, len(price)):
+        y = obv.iloc[i-window:i].values
+        x = np.arange(len(y))
+        slope = np.polyfit(x, y, 1)[0]
+        price_slope.iloc[i] = slope
+    features['OBV_Slope'] = price_slope.fillna(0)
+
+    price_low = price.rolling(window).min()
+    obv_low = obv.rolling(window).min()
+    features['OBV_Divergence_Low'] = ((price < price_low.shift(1)) & (obv > obv_low.shift(1))).astype(int)
+
+    return features
+
+
 def industry_relative_strength(close, index_close, window=10):
     stock_ma = close.rolling(window).mean()
     index_ma = index_close.rolling(window).mean()
@@ -443,16 +471,37 @@ def add_momentum_features(df, index_close=None):
     # =============================================
     # 短期均线上穿/下穿长期均线
     ma5 = close.rolling(5).mean()
+    ma10 = close.rolling(10).mean()
     ma20 = close.rolling(20).mean()
+    ma30 = close.rolling(30).mean()
     ma60 = close.rolling(60).mean()
+    ma120 = close.rolling(120).mean()
 
-    # 金叉/死叉
+    # 5/20均线金叉/死叉
     df['Mom_GoldenCross'] = ((ma5 > ma20) & (ma5.shift(1) <= ma20.shift(1))).astype(float)
     df['Mom_DeathCross'] = ((ma5 < ma20) & (ma5.shift(1) >= ma20.shift(1))).astype(float)
+
+    # 10/30均线金叉/死叉
+    df['Mom_GoldenCross_10_30'] = ((ma10 > ma30) & (ma10.shift(1) <= ma30.shift(1))).astype(float)
+    df['Mom_DeathCross_10_30'] = ((ma10 < ma30) & (ma10.shift(1) >= ma30.shift(1))).astype(float)
+
+    # 20/60均线金叉/死叉
+    df['Mom_GoldenCross_20_60'] = ((ma20 > ma60) & (ma20.shift(1) <= ma60.shift(1))).astype(float)
+    df['Mom_DeathCross_20_60'] = ((ma20 < ma60) & (ma20.shift(1) >= ma60.shift(1))).astype(float)
 
     # 多头排列
     df['Mom_BullishAlignment'] = ((ma5 > ma20) & (ma20 > ma60)).astype(float)
     df['Mom_BearishAlignment'] = ((ma5 < ma20) & (ma20 < ma60)).astype(float)
+
+    # =============================================
+    # 14.5 均线趋势特征（连续值，更有效）
+    # =============================================
+    for w in [5, 10, 20, 30]:
+        ma = close.rolling(w).mean()
+        # 均线趋势：今日MA vs 昨日MA，正值代表向上
+        df[f'MA{w}_Trend'] = (ma - ma.shift(1)) / (ma.shift(1) + 1e-8)
+        # 均线斜率（更稳定版本）
+        df[f'MA{w}_Slope'] = (ma - ma.shift(w)) / (ma.shift(w) * w + 1e-8)
 
     # =============================================
     # 15. 动量持续性指标
@@ -482,6 +531,61 @@ def add_momentum_features(df, index_close=None):
     # 动量方向综合判断
     df['Mom_Direction'] = np.where(df['Mom_Composite'] > 0.5, 1,
                                    np.where(df['Mom_Composite'] < -0.5, -1, 0))
+
+    # 添加缺失的变量定义
+    high = df['最高'].ffill()
+    low = df['最低'].ffill()
+    volume = df['成交量'].ffill()
+
+    # =============================================
+    # 17. 上周高低点突破
+    # =============================================
+    # 周K线：取上周的最高价和最低价
+    df['Week_High'] = high.rolling(5).max().shift(1)  # 上周高点
+    df['Week_Low'] = low.rolling(5).min().shift(1)    # 上周低点
+
+    # 今日突破上周高点
+    df['Break_Week_High'] = (close > df['Week_High']).astype(float)
+    # 今日跌破上周低点
+    df['Break_Week_Low'] = (close < df['Week_Low']).astype(float)
+
+    # =============================================
+    # 18. 天量突破（2倍量）
+    # =============================================
+    vol_ma5 = volume.rolling(5).mean()
+    df['Volume_Spike_2x'] = ((volume > 2 * vol_ma5) & (close.pct_change() > 0)).astype(float)
+
+    # =============================================
+    # 19. 三阳买两阴卖
+    # =============================================
+    # 连续3根阳线
+    is_up_day = (close > close.shift(1)).astype(int)
+    is_down_day = (close < close.shift(1)).astype(int)
+
+    # 统计前N天内连续阳线/阴线数量
+    for n in [3, 2]:
+        df[f'Consecutive_Up_{n}'] = is_up_day.rolling(n).apply(
+            lambda x: 1 if (len(x) == n and x.sum() == n) else 0, raw=True
+        )
+        df[f'Consecutive_Down_{n}'] = is_down_day.rolling(n).apply(
+            lambda x: 1 if (len(x) == n and x.sum() == n) else 0, raw=True
+        )
+
+    # 三阳后买信号（连续3阳后出现阴线）
+    df['Signal_ThreeUp'] = (df['Consecutive_Up_3'] == 1) & (is_down_day == 1)
+    df['Signal_ThreeUp'] = df['Signal_ThreeUp'].astype(float)
+
+    # 两阴后买信号（连续2阴后出现阳线）
+    df['Signal_TwoDown'] = (df['Consecutive_Down_2'] == 1) & (is_up_day == 1)
+    df['Signal_TwoDown'] = df['Signal_TwoDown'].astype(float)
+
+    # =============================================
+    # 20. 唐奇安通道（20日突破）
+    # =============================================
+    df['Donchian_High_20'] = high.rolling(20).max().shift(1)
+    df['Donchian_Low_20'] = low.rolling(20).min().shift(1)
+    df['Break_Donchian_High'] = (close > df['Donchian_High_20']).astype(float)
+    df['Break_Donchian_Low'] = (close < df['Donchian_Low_20']).astype(float)
 
     return df
 
@@ -652,209 +756,39 @@ def call_workflow_api(user_message, system_prompt='', stream=False):
 
 def get_llm_analysis(top_stocks_df, n=3):
     """
-    用大模型分析股票买卖建议
+    用大模型分析股票买卖建议 - 简化版
     """
-    # 选取TOP3股票
-    top_3 = top_stocks_df.head(n)
+    top_n = top_stocks_df.head(n)
 
-    # 准备数据
     stock_info = []
-    for _, row in top_3.iterrows():
-        stock_info.append(f"股票代码: {row['股票代码']}, 股票名称: {row['股票名称']}")
+    for _, row in top_n.iterrows():
+        score = row.get('加权得分', 'N/A')
+        d1_score = row.get('D1得分', 'N/A')
+        stock_info.append(f"{row['股票代码']} {row['股票名称']} (得分:{score:.4f}, 近3日:{d1_score:.4f})")
 
     stocks_str = "\n".join(stock_info)
 
-    # 构建prompt
-    prompt = f"""
-    当前日期：{datetime.now().strftime('%Y-%m-%d')}
-    分析师：Dr. Fan Zhang, Goldman Sachs Equity Research
-    任务：对以下{len(top_stocks_df)}只股票进行深度分析，提供投资建议
-    1000字以内
+    prompt = f"""当前日期：{datetime.now().strftime('%Y-%m-%d')}
 
-    股票列表：
-    {stocks_str}
+请分析以下股票，基于股票自身的技术面特征给出建议：
 
-    ## 高盛机构股票分析框架
+{stocks_str}
 
-    ### 1. 定性分析（Qualitative Analysis）
+输出格式（仅输出表格，不要任何解释或思考过程）：
 
-    **1.1 商业模式深度解构**
-    - 价值链定位：上游/中游/下游，议价能力分析
-    - 盈利驱动因素：单位经济模型、客户生命周期价值
-    - 可扩展性：边际成本曲线、网络效应强度
-    - 护城河评估：技术专利、品牌价值、转换成本、规模经济
+| 股票代码 | 股票名称 | 综合评级 | 核心逻辑 | 风险点 | 操作建议 |
+|----------|----------|----------|----------|--------|----------|"""
 
-    **1.2 竞争格局与行业结构**
-    - 行业集中度：赫芬达尔指数（HHI）计算
-    - 波特五力模型定量化评分
-    - 竞争优势可持续性：Greenwald框架评估
-    - 监管环境与政策风险敞口
-
-    **1.3 管理层与公司治理**
-    - 管理层过往资本配置记录（ROIC趋势）
-    - 股权激励与股东利益一致性
-    - ESG整合评分（环境、社会、治理）
-
-    ### 2. 定量分析（Quantitative Analysis）
-
-    **2.1 财务质量三维评估**
-
-    **盈利能力质量**
-    - 核心盈利能力：调整后EBIT利润率（剔除非经常性）
-    - 资本回报率：ROIC vs WACC差值（经济利润）
-    - 盈利可持续性：经营性现金流/净利润比率
-    - 杜邦分析分解：杠杆、周转、利润率贡献度
-
-    **财务健康度**
-    - 资产负债表韧性：净债务/EBITDA比率
-    - 流动性压力测试：现金转换周期、速动比率
-    - 或有负债评估：表外负债、养老金缺口
-
-    **增长质量**
-    - 有机增长vs并购增长分解
-    - 增量资本回报率（ICR）趋势
-    - 增长投资效率：Capex/收入比率
-
-    **2.2 估值模型矩阵（Valuation Matrix）**
-
-    **绝对估值模型**
-    - 三阶段DCF模型：详细假设透明化
-    - 第一阶段（5年）：详细业务预测
-    - 第二阶段（5年）：收敛期，ROIC回归WACC
-    - 第三阶段：永续期，永续增长率2.5%
-    - WACC计算：无风险利率、Beta、股权风险溢价、债务成本
-    - 情景分析：牛市/基本/熊市概率加权
-    - 敏感性分析：关键变量对估值影响
-
-    **相对估值框架**
-    - 跨周期估值：当前vs历史估值百分位（10年）
-    - 跨国比较：与全球同业估值差距分析
-    - 增长调整估值：PEG、EV/EBITDA-to-growth
-    - 质量调整估值：P/E-to-ROE、P/B-to-ROE散点图位置
-
-    **2.3 风险调整收益分析**
-    - 预期回报分解：股息+盈利增长+估值变化
-    - 下行风险量化：在险价值（VaR）、最大回撤
-    - 夏普比率、索提诺比率计算
-    - 相关性分析：与市场、行业Beta
-
-    ### 3. 催化剂与时间线（Catalysts & Timeline）
-
-    **3.1 近期催化剂（0-6个月）**
-    - 季度业绩预期vs共识
-    - 产品发布/监管审批时间线
-    - 行业供需格局变化
-
-    **3.2 中期驱动（6-18个月）**
-    - 产能扩张投产进度
-    - 市场份额获取验证点
-    - 成本结构优化效果
-
-    **3.3 长期主题（18个月+）**
-    - 结构性增长趋势契合度
-    - 竞争优势演进路径
-    - 潜在市场总规模（TAM）扩张
-
-    ### 4. 投资建议框架
-
-    **4.1 评级标准（基于风险调整后预期回报）**
-
-    买入（Buy）：预期回报 > 15%，风险调整后Alpha显著
-    - 确信度：高（>70%概率达到目标价）
-    - 仓位建议：3-5%（投资组合）
-
-    中性（Neutral）：预期回报 5-15%，无明显Alpha
-    - 确信度：中
-    - 仓位建议：基准权重
-
-    卖出（Sell）：预期回报 < 5%或下行风险 > 20%
-    - 确信度：中高
-    - 行动建议：减持或对冲
-
-    **4.2 目标价设定方法**
-    - 基于DCF估值：50%权重
-    - 相对估值区间：30%权重
-    - 技术面支撑：20%权重
-    - 给出三种情景目标价（牛市/基本/熊市）
-
-    ## 输出要求
-
-    ### 📊 分析摘要表
-
-    | 股票 | 评级 | 目标价 | 上行空间 | 下行风险 | 预期回报 | 夏普比率 | 建议仓位 |
-    |------|------|--------|----------|----------|----------|----------|----------|
-
-    ### 📈 详细分析（每只股票）
-
-    **股票1代码 - 股票1名称**
-
-    **投资论文（Investment Thesis）**
-    - 核心论点：1-2句话总结投资逻辑
-    - 关键假设：3-4个必须验证的假设
-    - 差异化认知：与市场共识的不同点
-
-    **估值摘要**
-    - DCF内在价值：XX元（范围：XX-XX）
-    - 相对估值：当前交易于历史X%分位，同业X%分位
-    - 目标价：XX元（上涨空间X%）
-
-    **风险回报分析**
-    - 上行情景（30%概率）：XX元（+X%）
-    - 基本情景（50%概率）：XX元（+X%）
-    - 下行情景（20%概率）：XX元（-X%）
-
-    **关键监控指标**
-    1. 季度营收增长 > X%
-    2. 毛利率维持在 X%以上
-    3. 经营现金流 > 净利润X%
-
-    **投资建议**
-    - 评级：【买入/中性/卖出】
-    - 建议仓位：X%
-    - 时间框架：X个月
-    - 替代方案：如无法买入，可考虑[相关标的]
-
-    ### 🎯 投资组合建议
-
-    **相对吸引力排序**
-    1. [最佳股票代码] - 风险调整后预期回报最高
-    2. [次选股票代码] - 风险回报比合理
-    3. [最次股票代码] - 存在结构性担忧
-
-    **组合构建建议**
-    - 核心持仓：[股票代码]，权重X%
-    - 战术配置：[股票代码]，权重X%
-    - 风险对冲：建议[对冲工具]对冲[特定风险]
-
-    ### ⚠️ 风险披露
-
-    **系统性风险**
-    - 宏观：利率路径、经济增长、通胀
-    - 地缘政治：贸易政策、区域冲突
-
-    **个股特定风险**
-    - 估值风险：关键假设不成立的可能性
-    - 执行风险：管理层执行能力
-    - 行业风险：技术颠覆、监管变化
-
-    ---
-
-    *本报告基于公开信息，已遵循高盛研究标准流程。估值模型假设可应要求提供。投资建议基于12个月时间框架。*
-
-    请严格按照此框架进行分析，确保分析的严谨性、可追溯性和透明度。
-    """
-
-    # 调用大模型
     system_prompt = ""
-
     try:
         analysis = call_workflow_api(
             system_prompt=system_prompt,
             user_message=prompt
         )
-        return analysis
+        return analysis if analysis else "分析服务暂时不可用"
     except Exception as e:
-        return f"大模型分析失败: {str(e)}"
+        print(f"大模型分析出错: {str(e)}")
+        return "分析服务暂时不可用"
 
 
 # =============================================
@@ -913,11 +847,28 @@ def get_momentum_feature_cols():
 
     # 14. 动量交叉信号
     feature_cols += ['Mom_GoldenCross', 'Mom_DeathCross', 'Mom_BullishAlignment', 'Mom_BearishAlignment']
+    feature_cols += ['Mom_GoldenCross_10_30', 'Mom_DeathCross_10_30', 'Mom_GoldenCross_20_60', 'Mom_DeathCross_20_60']
+
+    # 14.5 均线趋势特征
+    feature_cols += [f'MA{w}_Trend' for w in [5, 10, 20, 30]]
+    feature_cols += [f'MA{w}_Slope' for w in [5, 10, 20, 30]]
 
     # 15. 动量持续性
     feature_cols += [f'Mom_Persistence_{w}d' for w in [20, 60]]
 
     # 16. 复合动量
     feature_cols += ['Mom_Composite', 'Mom_Direction']
+
+    # 17. 上周高低点突破
+    feature_cols += ['Break_Week_High', 'Break_Week_Low']
+
+    # 18. 天量突破
+    feature_cols += ['Volume_Spike_2x']
+
+    # 19. 三阳买两阴卖
+    feature_cols += ['Signal_ThreeUp', 'Signal_TwoDown', 'Consecutive_Up_3', 'Consecutive_Up_2', 'Consecutive_Down_2', 'Consecutive_Down_3']
+
+    # 20. 唐奇安通道
+    feature_cols += ['Break_Donchian_High', 'Break_Donchian_Low']
 
     return feature_cols
