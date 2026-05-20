@@ -291,18 +291,98 @@ def calculate_sentiment_extremes(rsi, cci, window=14):
 
 
 def add_return_features(df, window=10):
-    """添加过去N天的日收益率序列"""
+    """添加过去N天的日对数收益率序列"""
     close = df['收盘'].ffill()
     for i in range(1, window+1):
-        df[f'Ret_{i}day'] = close.pct_change(i).fillna(0)
+        df[f'Ret_{i}day'] = np.log(close / close.shift(i)).fillna(0)
     return df
 
 
 def add_volume_features(df, window=10):
-    """添加过去N天的成交量变化率"""
+    """添加过去N天的成交量对数变化率"""
     volume = df['成交量'].ffill()
     for i in range(1, window+1):
-        df[f'VolChg_{i}day'] = (volume / volume.shift(i) - 1).fillna(0)
+        df[f'VolChg_{i}day'] = np.log(volume / volume.shift(i)).fillna(0)
+    return df
+
+
+# =============================================
+# 时间序列复杂度/编码特征
+# =============================================
+
+def add_timeseries_encoder_features(df, window=10):
+    """添加时间序列编码特征"""
+    close = df['收盘'].ffill()
+    volume = df['成交量'].ffill()
+    ret = np.log(close / close.shift(1)).fillna(0)
+    vol_chg = np.log(volume / volume.shift(1)).fillna(0)
+
+    # 1. 收益连涨/连跌天数
+    ret_sign = (ret > 0).astype(int)
+    up_streak = pd.Series(0, index=ret.index)
+    down_streak = pd.Series(0, index=ret.index)
+    for i in range(1, window):
+        up_streak = np.where(ret_sign.shift(i) == 1, up_streak + 1, 0)
+        down_streak = np.where(ret_sign.shift(i) == 0, down_streak + 1, 0)
+    df['Streak_Up'] = pd.Series(up_streak, index=ret.index).rolling(window).max().fillna(0)
+    df['Streak_Down'] = pd.Series(down_streak, index=ret.index).rolling(window).max().fillna(0)
+
+    # 2. 最大连续涨跌
+    def max_streak(signs):
+        max_up = max_down = cur_up = cur_down = 0
+        for s in signs:
+            if s > 0:
+                cur_up += 1
+                cur_down = 0
+                max_up = max(max_up, cur_up)
+            else:
+                cur_down += 1
+                cur_up = 0
+                max_down = max(max_down, cur_down)
+        return max_up, max_down
+
+    max_streaks = ret.rolling(window).apply(lambda x: max_streak(x)[0], raw=True)
+    df['Max_Consecutive_Up'] = max_streaks.ffill().fillna(0)
+    max_streaks_down = ret.rolling(window).apply(lambda x: max_streak(x)[1], raw=True)
+    df['Max_Consecutive_Down'] = max_streaks_down.ffill().fillna(0)
+
+    # 3. 波动率比 (短期/长期)
+    vol_5d = ret.rolling(5).std()
+    vol_20d = ret.rolling(20).std()
+    df['Volatility_Ratio_5_20'] = vol_5d / (vol_20d + 1e-8)
+
+    # 4. 收益二阶导 (动量加速/减速)
+    df['Ret_2nd_Derivative'] = ret.diff().diff().fillna(0)
+
+    # 5. 收益率熵
+    def calc_entropy(x):
+        x = np.abs(x)
+        x = x / (x.sum() + 1e-10)
+        return -np.sum(x * np.log(x + 1e-10))
+
+    df['Ret_Entropy'] = ret.rolling(window).apply(calc_entropy, raw=True).fillna(0)
+    df['Vol_Entropy'] = vol_chg.rolling(window).apply(calc_entropy, raw=True).fillna(0)
+
+    # 6. Hurst指数 (简化版: H > 0.5 趋势, H < 0.5 均值回复)
+    def rolling_hurst(returns, window=20):
+        if len(returns) < window:
+            return 0.5
+        try:
+            mean_ret = returns.mean()
+            std_ret = returns.std()
+            if std_ret == 0:
+                return 0.5
+            y = np.cumsum(returns - mean_ret)
+            R = y.max() - y.min()
+            S = std_ret
+            if S == 0:
+                return 0.5
+            return 0.5 * np.log(R / S + 1e-10) / np.log(window) + 0.5
+        except:
+            return 0.5
+
+    df['Hurst_Index'] = ret.rolling(20).apply(lambda x: rolling_hurst(x, 20), raw=True).fillna(0.5)
+
     return df
 
 
@@ -496,12 +576,22 @@ def add_momentum_features(df, index_close=None):
     # =============================================
     # 14.5 均线趋势特征（连续值，更有效）
     # =============================================
-    for w in [5, 10, 20, 30]:
+    for w in [5, 10, 20, 30, 60, 120]:
         ma = close.rolling(w).mean()
-        # 均线趋势：今日MA vs 昨日MA，正值代表向上
         df[f'MA{w}_Trend'] = (ma - ma.shift(1)) / (ma.shift(1) + 1e-8)
-        # 均线斜率（更稳定版本）
         df[f'MA{w}_Slope'] = (ma - ma.shift(w)) / (ma.shift(w) * w + 1e-8)
+
+    # 周线均线斜率
+    df_week = df.copy()
+    df_week['日期'] = pd.to_datetime(df_week['日期'])
+    df_week = df_week.set_index('日期').resample('W').agg({'收盘': 'last'}).dropna()
+    for w in [5, 10, 20]:
+        ma_w = df_week['收盘'].rolling(w).mean()
+        df_week[f'MA{w}_Week_Slope'] = (ma_w - ma_w.shift(w)) / (ma_w.shift(w) * w + 1e-8)
+    week_slope_map = df_week[[f'MA{w}_Week_Slope' for w in [5, 10, 20]]].to_dict('index')
+    for w in [5, 10, 20]:
+        df[f'MA{w}_Week_Slope'] = df['日期'].map(lambda x: week_slope_map.get(pd.Timestamp(x), {}).get(f'MA{w}_Week_Slope', np.nan))
+        df[f'MA{w}_Week_Slope'] = df[f'MA{w}_Week_Slope'].ffill().fillna(0)
 
     # =============================================
     # 15. 动量持续性指标
@@ -762,15 +852,13 @@ def get_llm_analysis(top_stocks_df, n=3):
 
     stock_info = []
     for _, row in top_n.iterrows():
-        score = row.get('加权得分', 'N/A')
-        d1_score = row.get('D1得分', 'N/A')
-        stock_info.append(f"{row['股票代码']} {row['股票名称']} (得分:{score:.4f}, 近3日:{d1_score:.4f})")
+        stock_info.append(f"{row['股票名称']}")
 
     stocks_str = "\n".join(stock_info)
 
     prompt = f"""当前日期：{datetime.now().strftime('%Y-%m-%d')}
 
-请分析以下股票，基于股票自身的技术面特征给出建议：
+请分析以下股票，基于股票自身的基本面给出建议：
 
 {stocks_str}
 
@@ -785,6 +873,9 @@ def get_llm_analysis(top_stocks_df, n=3):
             system_prompt=system_prompt,
             user_message=prompt
         )
+        if analysis:
+            import re
+            analysis = re.sub(r'<think>.*?</think>', '', analysis, flags=re.DOTALL).strip()
         return analysis if analysis else "分析服务暂时不可用"
     except Exception as e:
         print(f"大模型分析出错: {str(e)}")
@@ -850,8 +941,9 @@ def get_momentum_feature_cols():
     feature_cols += ['Mom_GoldenCross_10_30', 'Mom_DeathCross_10_30', 'Mom_GoldenCross_20_60', 'Mom_DeathCross_20_60']
 
     # 14.5 均线趋势特征
-    feature_cols += [f'MA{w}_Trend' for w in [5, 10, 20, 30]]
-    feature_cols += [f'MA{w}_Slope' for w in [5, 10, 20, 30]]
+    feature_cols += [f'MA{w}_Trend' for w in [5, 10, 20, 30, 60, 120]]
+    feature_cols += [f'MA{w}_Slope' for w in [5, 10, 20, 30, 60, 120]]
+    feature_cols += [f'MA{w}_Week_Slope' for w in [5, 10, 20]]
 
     # 15. 动量持续性
     feature_cols += [f'Mom_Persistence_{w}d' for w in [20, 60]]
@@ -870,5 +962,13 @@ def get_momentum_feature_cols():
 
     # 20. 唐奇安通道
     feature_cols += ['Break_Donchian_High', 'Break_Donchian_Low']
+
+    # 21. 时间序列编码特征
+    feature_cols += ['Streak_Up', 'Streak_Down', 'Max_Consecutive_Up', 'Max_Consecutive_Down']
+    feature_cols += ['Volatility_Ratio_5_20', 'Ret_2nd_Derivative', 'Ret_Entropy', 'Vol_Entropy', 'Hurst_Index']
+
+    # 22. 机构量化因子（从factors.py导入）
+    from factors import get_institutional_factor_cols
+    feature_cols += get_institutional_factor_cols()
 
     return feature_cols

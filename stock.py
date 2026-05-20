@@ -9,6 +9,7 @@ from sklearn.metrics import (roc_auc_score, precision_score,
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from utils import *
+from factors import add_institutional_factors
 from sklearn.preprocessing import RobustScaler
 from visualizer import StockVisualizer
 from logger import init_logger, close_logger, get_logger
@@ -258,6 +259,8 @@ def main():
 
         df = add_return_features(df, window=30)  # 添加10天收益率序列
         df = add_volume_features(df, window=30)  # 添加10天成交量变化率
+        df = add_timeseries_encoder_features(df, window=10)  # 添加时间序列编码特征
+        df = add_institutional_factors(df)  # 添加机构量化因子
 
         df = add_momentum_features(df, index_close=index_data['close'])
 
@@ -562,9 +565,36 @@ def main():
     for i, (feat, imp) in enumerate(sorted_importance, 1):
         print(f"  {i:3d}. {feat}: {imp:.0f}")
 
+    # ========== 相关性筛选 ==========
+    CORR_THRESHOLD = 0.9
+    print(f"\n相关性筛选 (阈值={CORR_THRESHOLD})...")
+    corr_matrix = X_final.corr().abs()
+    high_corr = (corr_matrix > CORR_THRESHOLD) & (corr_matrix < 1.0)
+
+    to_drop = set()
+    dropped_info = []
+    for col in high_corr.columns:
+        if col in to_drop:
+            continue
+        correlated_cols = high_corr.index[high_corr[col]].tolist()
+        if len(correlated_cols) > 0:
+            for c in correlated_cols[1:]:
+                to_drop.add(c)
+            dropped_info.append(f"  {correlated_cols[0]} <- {correlated_cols[1:]}")
+
+    print(f"因高相关性被剔除的特征 ({len(to_drop)}个):")
+    for info in dropped_info[:10]:
+        print(info)
+    if len(dropped_info) > 10:
+        print(f"  ... 还有{len(dropped_info)-10}组")
+
+    # 在重要性排序中排除被剔除的特征
+    filtered_importance = [(f, imp) for f, imp in sorted_importance if f not in to_drop]
+    print(f"相关性筛选后剩余 {len(filtered_importance)} 个特征")
+
     # 选择 Top 50 特征
     TOP_N_FEATURES = 50
-    selected_features = [feat for feat, _ in sorted_importance[:TOP_N_FEATURES]]
+    selected_features = [feat for feat, _ in filtered_importance[:TOP_N_FEATURES]]
     print(f"\n✅ 选择 Top {TOP_N_FEATURES} 特征进行最终训练")
 
     # 使用选中的特征重新构建训练数据
